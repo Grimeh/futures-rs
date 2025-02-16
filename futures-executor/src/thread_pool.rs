@@ -11,8 +11,8 @@ use std::format;
 use std::io;
 use std::string::String;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::mpmc;
+use std::sync::Arc;
 use std::thread;
 
 /// A general-purpose thread pool for scheduling tasks that poll futures to
@@ -49,8 +49,8 @@ trait AssertSendSync: Send + Sync {}
 impl AssertSendSync for ThreadPool {}
 
 struct PoolState {
-    tx: Mutex<mpsc::Sender<Message>>,
-    rx: Mutex<mpsc::Receiver<Message>>,
+    tx: mpmc::Sender<Message>,
+    rx: mpmc::Receiver<Message>,
     cnt: AtomicUsize,
     size: usize,
 }
@@ -141,7 +141,7 @@ impl Spawn for ThreadPool {
 
 impl PoolState {
     fn send(&self, msg: Message) {
-        self.tx.lock().unwrap().send(msg).unwrap();
+        self.tx.send(msg).unwrap();
     }
 
     fn work(
@@ -155,7 +155,7 @@ impl PoolState {
             after_start(idx);
         }
         loop {
-            let msg = self.rx.lock().unwrap().recv().unwrap();
+            let msg = self.rx.recv().unwrap();
             match msg {
                 Message::Run(task) => task.run(),
                 Message::Close => break,
@@ -261,11 +261,11 @@ impl ThreadPoolBuilder {
 
     /// Create a [`ThreadPool`](ThreadPool) with the given configuration.
     pub fn create(&mut self) -> Result<ThreadPool, io::Error> {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpmc::channel();
         let pool = ThreadPool {
             state: Arc::new(PoolState {
-                tx: Mutex::new(tx),
-                rx: Mutex::new(rx),
+                tx,
+                rx,
                 cnt: AtomicUsize::new(1),
                 size: self.pool_size,
             }),
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn test_drop_after_start() {
         {
-            let (tx, rx) = mpsc::sync_channel(2);
+            let (tx, rx) = mpmc::sync_channel(2);
             let _cpu_pool = ThreadPoolBuilder::new()
                 .pool_size(2)
                 .after_start(move |_| tx.send(1).unwrap())

@@ -1,3 +1,5 @@
+#![feature(mpmc_channel)]
+
 //! Built-in executors and related tools.
 //!
 //! All asynchronous computation occurs within an executor, which is
