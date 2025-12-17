@@ -6,7 +6,8 @@ use futures_task::{waker_ref, ArcWake};
 use futures_task::{FutureObj, Spawn, SpawnError};
 use futures_util::future::FutureExt;
 use std::boxed::Box;
-use std::fmt;
+use std::{fmt, panic};
+use std::any::Any;
 use std::format;
 use std::io;
 use std::string::String;
@@ -42,6 +43,7 @@ pub struct ThreadPoolBuilder {
     name_prefix: Option<String>,
     after_start: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     before_stop: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    on_panic: Option<Arc<dyn Fn(usize, Box<dyn Any + Send>) + Send + Sync>>,
 }
 
 #[allow(dead_code)]
@@ -149,6 +151,7 @@ impl PoolState {
         idx: usize,
         after_start: Option<Arc<dyn Fn(usize) + Send + Sync>>,
         before_stop: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+        on_panic: Option<Arc<dyn Fn(usize, Box<dyn Any + Send + 'static>) + Send + Sync>>,
     ) {
         let _scope = enter().unwrap();
         if let Some(after_start) = after_start {
@@ -157,7 +160,14 @@ impl PoolState {
         loop {
             let msg = self.rx.recv().unwrap();
             match msg {
-                Message::Run(task) => task.run(),
+                Message::Run(task) => match panic::catch_unwind(|| task.run()) {
+                    Ok(()) => {},
+                    Err(p) => if let Some(ref on_panic) = on_panic {
+                        on_panic(idx, p)
+                    } else {
+                        panic::resume_unwind(p)
+                    }
+                },
                 Message::Close => break,
             }
         }
@@ -190,7 +200,7 @@ impl ThreadPoolBuilder {
     /// See the other methods on this type for details on the defaults.
     pub fn new() -> Self {
         let pool_size = thread::available_parallelism().map_or(1, |p| p.get());
-        Self { pool_size, stack_size: 0, name_prefix: None, after_start: None, before_stop: None }
+        Self { pool_size, stack_size: 0, name_prefix: None, after_start: None, before_stop: None, on_panic: None }
     }
 
     /// Set size of a future ThreadPool
@@ -259,6 +269,21 @@ impl ThreadPoolBuilder {
         self
     }
 
+    /// Execute closure `f` when a panic is caught from a task in a worker thread.
+    /// Only applicable if the panic behaviour is unwind.
+    ///
+    /// The closure `f` will be dropped after the `builder` is dropped
+    /// and all threads in the pool have executed it.
+    ///
+    /// The closure provided will receive an index corresponding to the worker
+    /// thread it's running on.
+    pub fn on_panic<F>(&mut self, f: F) -> &mut Self
+        where F: Fn(usize, Box<dyn Any + Send>) + Send + Sync + 'static,
+    {
+        self.on_panic = Some(Arc::new(f));
+        self
+    }
+
     /// Create a [`ThreadPool`](ThreadPool) with the given configuration.
     pub fn create(&mut self) -> Result<ThreadPool, io::Error> {
         let (tx, rx) = mpmc::channel();
@@ -275,6 +300,7 @@ impl ThreadPoolBuilder {
             let state = pool.state.clone();
             let after_start = self.after_start.clone();
             let before_stop = self.before_stop.clone();
+            let on_panic = self.on_panic.clone();
             let mut thread_builder = thread::Builder::new();
             if let Some(ref name_prefix) = self.name_prefix {
                 thread_builder = thread_builder.name(format!("{name_prefix}{counter}"));
@@ -282,7 +308,7 @@ impl ThreadPoolBuilder {
             if self.stack_size > 0 {
                 thread_builder = thread_builder.stack_size(self.stack_size);
             }
-            thread_builder.spawn(move || state.work(counter, after_start, before_stop))?;
+            thread_builder.spawn(move || state.work(counter, after_start, before_stop, on_panic))?;
         }
         Ok(pool)
     }

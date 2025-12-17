@@ -6,6 +6,7 @@ use core::{
     pin::Pin,
     task::{Context, Poll},
 };
+use std::panic::UnwindSafe;
 
 /// A custom trait object for polling futures, roughly akin to
 /// `Box<dyn Future<Output = T> + 'a>`.
@@ -103,6 +104,7 @@ pub struct FutureObj<'a, T>(LocalFutureObj<'a, T>);
 
 impl<T> Unpin for FutureObj<'_, T> {}
 unsafe impl<T> Send for FutureObj<'_, T> {}
+impl<T> UnwindSafe for FutureObj<'_, T> {}
 
 impl<'a, T> FutureObj<'a, T> {
     /// Create a `FutureObj` from a custom trait object representation.
